@@ -677,7 +677,6 @@ const authenticateToken = (req, res, next) => {
 // ==========================================
 // 4. MAP CREATION & SVG UPLOAD (DYNAMIC SIZE FIX)
 // ==========================================
-// --- GET: Fetch all maps with hospital/building context ---
 app.get("/api/maps", authenticateToken, async (req, res) => {
   try {
     const maps = await MapDoc.find({ ownerId: req.user.id }).sort({
@@ -687,8 +686,6 @@ app.get("/api/maps", authenticateToken, async (req, res) => {
       maps.map((m) => ({
         id: m.id,
         name: m.name,
-        hospital: m.hospital, // Added field
-        building: m.building, // Added field
         updatedAt: m.updatedAt.getTime(),
       })),
     );
@@ -697,29 +694,21 @@ app.get("/api/maps", authenticateToken, async (req, res) => {
   }
 });
 
-// --- POST: Create map with hierarchy ---
 app.post("/api/maps", authenticateToken, async (req, res) => {
   try {
-    const { name, hospitalId, hospitalName, buildingId, buildingName } =
-      req.body;
     const mapId = crypto.randomUUID();
-
     await MapDoc.create({
       id: mapId,
-      name: name, // The floor selection (e.g. "Floor 1")
-      hospitalId, // The unique reference ID
-      hospitalName, // Denormalized name for the UI
-      buildingId, // The unique reference ID
-      buildingName, // Denormalized name for the UI
+      name: req.body.name || "New Floorplan",
+      ownerId: req.user.id,
       svgUrl: null,
       canvasW: 1500,
       canvasH: 1000,
       vertices: [],
     });
-
     res.json({ message: "Map created", mapId });
   } catch (err) {
-    res.status(500).json({ error: "Database error" });
+    res.status(500).json({ error: "Failed to create map" });
   }
 });
 
