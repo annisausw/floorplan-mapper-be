@@ -12,6 +12,8 @@ import swaggerJsdoc from "swagger-jsdoc";
 import multer from "multer";
 import mongoose from "mongoose";
 import sharp from "sharp";
+import { createServer } from "http";
+import { Server } from "socket.io";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,47 +45,45 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// --- Updated Schemas ---
-const graphNodeSchema = new mongoose.Schema(
+const nodeSchema = new mongoose.Schema(
   {
     id: { type: String, required: true },
-    type: { type: String, enum: ["room", "junction"] },
-    connection: [String],
+    type: { type: String, enum: ["room", "junction"], required: true },
+    floor: Number,
     cx: Number,
     cy: Number,
-  },
-  { _id: false },
-);
-
-const roomBaseSchema = new mongoose.Schema(
-  {
-    id: { type: String, required: true },
+    connection: [String],
+    // Room specific fields
     slug: String,
+    objectName: String, 
     label: String,
-    floor: String,
+    categoryId: String,
     wings: String,
-    "room-type": String,
-    keywords: String,
-    aliases: String,
+    aliases: [String],  
+    keywords: [String], 
     description_id: String,
     description_en: String,
   },
-  { _id: false },
+  { _id: false }
 );
 
 const mapSchema = new mongoose.Schema(
   {
     id: { type: String, required: true, unique: true },
     name: String,
-    ownerId: String,
+    hospitalId: { type: String, required: true },
+    hospitalName: String,
+    buildingId: { type: String, required: true },
+    buildingName: String,
     svgUrl: String,
     canvasW: { type: Number, default: 1500 },
     canvasH: { type: Number, default: 1000 },
-    graph: [graphNodeSchema], // The Spatial Data
-    rooms: [roomBaseSchema], // The Metadata
+    nodes: [nodeSchema],
   },
-  { timestamps: true },
+  { timestamps: true }
 );
+
+const MapDoc = mongoose.model("Map", mapSchema);
 
 const routeImageSchema = new mongoose.Schema(
   {
@@ -99,8 +99,6 @@ const routeImageSchema = new mongoose.Schema(
 );
 
 const RouteImage = mongoose.model("RouteImage", routeImageSchema);
-
-const MapDoc = mongoose.model("Map", mapSchema);
 
 // --- Helper to merge data for the Frontend ---
 const formatMap = (doc) => {
@@ -310,7 +308,7 @@ const swaggerOptions = {
               "multipart/form-data": {
                 schema: {
                   type: "object",
-                  properties: { svgFile: { type: "string", format: "binary" } },
+                  properties: { file: { type: "string", format: "binary" } },
                 },
               },
             },
@@ -679,36 +677,60 @@ const authenticateToken = (req, res, next) => {
 // ==========================================
 app.get("/api/maps", authenticateToken, async (req, res) => {
   try {
-    const maps = await MapDoc.find({ ownerId: req.user.id }).sort({
-      updatedAt: -1,
-    });
-    res.json(
-      maps.map((m) => ({
-        id: m.id,
-        name: m.name,
-        updatedAt: m.updatedAt.getTime(),
-      })),
-    );
+    const { hospitalId, buildingId } = req.query;
+    
+    // Create a filter object based on query params
+    const filter = {};
+    if (hospitalId) filter.hospitalId = hospitalId;
+    if (buildingId) filter.buildingId = buildingId;
+
+    const maps = await MapDoc.find(filter).sort({ updatedAt: -1 });
+    
+    res.json(maps.map((m) => ({
+      id: m.id,
+      name: m.name, // This matches your floor names (e.g., "Floor 1")
+      updatedAt: m.updatedAt.getTime(),
+      // Include any other data needed for the card
+    })));
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch maps" });
+    res.status(500).json({ error: "Failed to fetch maps", details: err.message });
   }
 });
 
 app.post("/api/maps", authenticateToken, async (req, res) => {
   try {
-    const mapId = crypto.randomUUID();
-    await MapDoc.create({
-      id: mapId,
-      name: req.body.name || "New Floorplan",
-      ownerId: req.user.id,
+    const { 
+      name, 
+      hospitalId, 
+      hospitalName, 
+      buildingId, 
+      buildingName 
+    } = req.body;
+
+    if (!hospitalId || !buildingId) {
+      return res.status(400).json({ error: "Hospital and Building IDs are required." });
+    }
+
+    const newMap = await MapDoc.create({
+      id: crypto.randomUUID(),
+      name: name || "New Floorplan",
+      hospitalId,
+      hospitalName: hospitalName || "Unknown Hospital",
+      buildingId,
+      buildingName: buildingName || "Main Building",
       svgUrl: null,
-      canvasW: 1500,
-      canvasH: 1000,
-      vertices: [],
+      canvasW: 1122.6667, // Updated to match your example JSON defaults
+      canvasH: 793.33331,
+      nodes: [] 
     });
-    res.json({ message: "Map created", mapId });
+
+    res.status(201).json({ 
+      message: "Map created successfully", 
+      mapId: newMap.id,
+      map: newMap 
+    });
   } catch (err) {
-    res.status(500).json({ error: "Failed to create map" });
+    res.status(500).json({ error: "Failed to create map", details: err.message });
   }
 });
 
@@ -720,8 +742,8 @@ app.delete("/api/maps/:id", authenticateToken, async (req, res) => {
       return res.status(403).json({ error: "Unauthorized" });
 
     await MapDoc.deleteOne({ id: req.params.id });
-    const svgFile = path.join(DATA_DIR, `${req.params.id}.svg`);
-    if (fs.existsSync(svgFile)) fs.unlinkSync(svgFile);
+    const file = path.join(DATA_DIR, `${req.params.id}.svg`);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
 
     res.json({ message: "Map deleted successfully" });
   } catch (err) {
@@ -732,36 +754,60 @@ app.delete("/api/maps/:id", authenticateToken, async (req, res) => {
 app.get("/api/maps/:id", authenticateToken, async (req, res) => {
   try {
     const map = await MapDoc.findOne({ id: req.params.id });
+    
     if (!map) return res.status(404).json({ error: "Map not found" });
-    res.json(formatMap(map));
+    
+    // Adjusted to return the full Unified Structure
+    res.json({
+      id: map.id,
+      name: map.name,
+      hospitalId: map.hospitalId,
+      hospitalName: map.hospitalName,
+      buildingId: map.buildingId,
+      buildingName: map.buildingName,
+      svgUrl: map.svgUrl,
+      canvasW: map.canvasW,
+      canvasH: map.canvasH,
+      nodes: map.nodes || [], 
+      createdAt: map.createdAt,
+      updatedAt: map.updatedAt
+    });
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch map" });
+    res.status(500).json({ error: "Failed to fetch map", details: err.message });
   }
 });
 
 /**
  * GET: Protected SVG Map Background
  */
-app.get("/api/maps/:id/svg", authenticateToken, async (req, res) => {
+app.get("/api/maps/:id/background", authenticateToken, async (req, res) => {
   try {
     const map = await MapDoc.findOne({ id: req.params.id });
     if (!map) return res.status(404).json({ error: "Map not found" });
 
-    if (map.ownerId !== req.user.id) {
+    // Check ownership (Adjusting property names to match your schema)
+    // If you use 'owner' (username) instead of 'ownerId', update this line:
+    if (map.owner && map.owner !== req.user.username) {
       return res.status(403).json({ error: "Unauthorized access" });
     }
 
-    // Ensure the path is Absolute
-    const svgPath = path.resolve(DATA_DIR, `${req.params.id}.svg`);
-
-    if (!fs.existsSync(svgPath)) {
-      return res.status(404).json({ error: "SVG file not found" });
+    if (!map.svgUrl) {
+      return res.status(404).json({ error: "No background image uploaded for this map" });
     }
 
-    res.setHeader("Content-Type", "image/svg+xml");
+    // Extract the extension from the saved URL (e.g., .svg or .png)
+    const fileExt = map.svgUrl.split('.').pop(); 
+    const filePath = path.resolve(DATA_DIR, `${req.params.id}.${fileExt}`);
 
-    // Use a callback to catch streaming errors
-    res.sendFile(svgPath, (err) => {
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: "Background file not found on server" });
+    }
+
+    // Set correct Content-Type based on extension
+    const contentType = fileExt === 'svg' ? 'image/svg+xml' : `image/${fileExt}`;
+    res.setHeader("Content-Type", contentType);
+
+    res.sendFile(filePath, (err) => {
       if (err) {
         console.error("Error sending file:", err);
         if (!res.headersSent) {
@@ -770,14 +816,15 @@ app.get("/api/maps/:id/svg", authenticateToken, async (req, res) => {
       }
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
 app.post(
-  "/api/maps/:id/svg",
+  "/api/maps/:id/background",
   authenticateToken,
-  upload.single("svgFile"),
+  upload.single("file"),
   async (req, res) => {
     try {
       if (!req.file)
@@ -1044,144 +1091,58 @@ app.get("/api/routes/image/:fileName", authenticateToken, async (req, res) => {
 });
 
 // ==========================================
-// 6. GRAPH & ROOM OPERATIONS (SEPARATED CRUD)
+// 6. NODES OPERATIONS 
 // ==========================================
 
-/**
- * 6A. GRAPH OPERATIONS
- * Handles spatial data (id, type, connection, cx, cy)
- */
-app.get("/api/maps/:id/graph", authenticateToken, async (req, res) => {
+// GET: Fetch all nodes for a map (Global access)
+app.get("/api/maps/:id/nodes", authenticateToken, async (req, res) => {
   try {
     const map = await MapDoc.findOne({ id: req.params.id });
     if (!map) return res.status(404).json({ error: "Map not found" });
-    res.json(map.graph || []);
+    res.json(map.nodes || []);
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch graph" });
+    res.status(500).json({ error: "Failed to fetch nodes" });
   }
 });
 
-app.post("/api/maps/:id/graph", authenticateToken, async (req, res) => {
+// PUT: Full Sync (Global overwrite)
+app.put("/api/maps/:id/nodes", authenticateToken, async (req, res) => {
   try {
-    const incomingGraph = Array.isArray(req.body) ? req.body : [req.body];
+    const { nodes } = req.body;
     const map = await MapDoc.findOneAndUpdate(
-      { id: req.params.id, ownerId: req.user.id },
-      { $push: { graph: { $each: incomingGraph } } },
-      { new: true },
+      { id: req.params.id },
+      { $set: { nodes: nodes || [] } },
+      { new: true }
     );
     if (!map) return res.status(404).json({ error: "Map not found" });
-    res.status(201).json({ message: "Graph nodes added successfully" });
+    res.json({ message: "Global map nodes updated successfully" });
   } catch (err) {
-    res.status(500).json({ error: "Failed to add graph nodes" });
+    res.status(500).json({ error: "Failed to sync nodes" });
   }
 });
 
-app.put("/api/maps/:id/graph", authenticateToken, async (req, res) => {
+app.delete("/api/maps/:id/nodes", authenticateToken, async (req, res) => {
   try {
-    const { graph } = req.body;
-    const map = await MapDoc.findOne({
-      id: req.params.id,
-      ownerId: req.user.id,
-    });
-    if (!map)
-      return res.status(404).json({ error: "Map not found or unauthorized" });
-
-    map.graph = graph || [];
-    map.markModified("graph");
-    await map.save();
-    res.json({ message: "Graph spatial data synced successfully" });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to sync graph" });
-  }
-});
-
-/**
- * 6B. ROOM OPERATIONS
- * Handles metadata (slug, label, floor, wings, descriptions, etc.)
- */
-app.get("/api/maps/:id/rooms", authenticateToken, async (req, res) => {
-  try {
+    const { ids } = req.body; 
     const map = await MapDoc.findOne({ id: req.params.id });
-    if (!map) return res.status(404).json({ error: "Map not found" });
-    res.json(map.rooms || []);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch room metadata" });
-  }
-});
-
-app.post("/api/maps/:id/rooms", authenticateToken, async (req, res) => {
-  try {
-    const incomingRooms = Array.isArray(req.body) ? req.body : [req.body];
-    // Security: Filter to ensure we only save room metadata
-    const map = await MapDoc.findOneAndUpdate(
-      { id: req.params.id, ownerId: req.user.id },
-      { $push: { rooms: { $each: incomingRooms } } },
-      { new: true },
-    );
-    if (!map) return res.status(404).json({ error: "Map not found" });
-    res.status(201).json({ message: "Room metadata added successfully" });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to add room metadata" });
-  }
-});
-
-app.put("/api/maps/:id/rooms", authenticateToken, async (req, res) => {
-  try {
-    // Check if rooms is inside an object or is the body itself
-    const roomsData =
-      req.body.rooms || (Array.isArray(req.body) ? req.body : []);
-
-    const map = await MapDoc.findOneAndUpdate(
-      { id: req.params.id, ownerId: req.user.id },
-      { $set: { rooms: roomsData } },
-      { returnDocument: "after" }, // Modern replacement for { new: true }
-    );
-
-    if (!map)
-      return res.status(404).json({ error: "Map not found or unauthorized" });
-
-    res.json({ message: "Room metadata synced successfully" });
-  } catch (err) {
-    console.error("Sync Error Detail:", err); // Log the actual error to your terminal
-    res
-      .status(500)
-      .json({ error: "Failed to sync rooms", details: err.message });
-  }
-});
-
-/**
- * 6C. UNIFIED OPERATIONS
- * These remain for backward compatibility with App4.tsx
- */
-// DELETE: Removes from both arrays and cleans connections
-app.delete("/api/maps/:id/vertices", authenticateToken, async (req, res) => {
-  try {
-    const { ids } = req.body;
-    if (!ids || !Array.isArray(ids))
-      return res.status(400).json({ error: "Invalid IDs" });
-
-    const map = await MapDoc.findOne({
-      id: req.params.id,
-      ownerId: req.user.id,
-    });
+    
     if (!map) return res.status(404).json({ error: "Map not found" });
 
-    map.graph = map.graph.filter((v) => !ids.includes(v.id));
-    map.rooms = map.rooms.filter((r) => !ids.includes(r.id));
+    // Filter out the deleted nodes
+    map.nodes = map.nodes.filter((n) => !ids.includes(n.id));
 
-    // Clean connections in remaining graph nodes
-    map.graph.forEach((v) => {
-      if (v.connection) {
-        v.connection = v.connection.filter((connId) => !ids.includes(connId));
+    // Cleanup stale connections
+    map.nodes.forEach((n) => {
+      if (n.connection) {
+        n.connection = n.connection.filter((connId) => !ids.includes(connId));
       }
     });
 
-    map.markModified("graph");
-    map.markModified("rooms");
+    map.markModified("nodes");
     await map.save();
-    res.json({ message: "Deleted successfully", deletedCount: ids.length });
+    res.json({ message: "Nodes deleted globally", deletedCount: ids.length });
   } catch (err) {
-    res.status(500).json({ error: "Failed to delete" });
+    res.status(500).json({ error: "Failed to delete nodes" });
   }
 });
 
@@ -1211,9 +1172,59 @@ app.get("/api/maps/:id/export/db", authenticateToken, async (req, res) => {
   }
 });
 
+// Endpoint to get hospital list
+app.get("/api/hospitals", authenticateToken, async (req, res) => {
+  try {
+    const hospitals = await HospitalDoc.find({}, "Hospital id building");
+    res.json(hospitals);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch hospitals" });
+  }
+});
+
+// ==========================================
+// 8. SESSION ENDPOINTS (PEER TO PEER COLLABORATION)
+// ==========================================
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: { 
+    origin: "http://localhost:5173", 
+    methods: ["GET", "POST"],
+    credentials: true
+   }
+});
+
+// Registry to track: { socketId: { mapId, username, peerId } }
+const activeUsers = new Map();
+
+io.on("connection", (socket) => {
+  socket.on("join-map", ({ mapId, username, peerId }) => {
+    socket.join(mapId);
+    activeUsers.set(socket.id, { mapId, username, peerId });
+
+    // Tell everyone in the room to update their peer connections
+    const usersInRoom = Array.from(activeUsers.values()).filter(u => u.mapId === mapId);
+    io.to(mapId).emit("room-presence-update", usersInRoom);
+  });
+
+  socket.on("disconnect", () => {
+    const user = activeUsers.get(socket.id);
+    if (user) {
+      activeUsers.delete(socket.id);
+      const usersInRoom = Array.from(activeUsers.values()).filter(u => u.mapId === user.mapId);
+      io.to(user.mapId).emit("room-presence-update", usersInRoom);
+    }
+  });
+});
+
 app.use("/data", express.static(DATA_DIR));
 
-app.listen(PORT, () => {
-  console.log(`💾 API Server running on http://localhost:${PORT}`);
-  console.log(`📖 Swagger Docs available at http://localhost:${PORT}/docs`);
+// IMPORTANT: Change app.listen to httpServer.listen
+httpServer.listen(PORT, () => {
+  console.log(`🚀 Server + Collaboration running on port ${PORT}`);
 });
+
+// app.listen(PORT, () => {
+//   console.log(`💾 API Server running on http://localhost:${PORT}`);
+//   console.log(`📖 Swagger Docs available at http://localhost:${PORT}/docs`);
+// });
