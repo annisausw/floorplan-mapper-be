@@ -431,32 +431,32 @@ const swaggerOptions = {
             500: { description: "Failed to synchronization structural data elements securely" }
           },
         },
-        delete: {
-          tags: ["Nodes"],
-          summary: "Removes explicit data node parameters by identity matching loops and scrub reference mappings",
-          parameters: [
-            { in: "path", name: "id", required: true, schema: { type: "string" } },
-          ],
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["ids"],
-                  properties: {
-                    ids: { type: "array", items: { type: "string" }, example: ["room_101", "junc_55"] }
-                  }
-                }
-              }
-            }
-          },
-          responses: {
-            200: { description: "Target items stripped clean and dependency connections decoupled successfully" },
-            404: { description: "Target context profile not found" },
-            500: { description: "Entity operation removal workflow execution error encountered" }
-          }
-        }
+        // delete: {
+        //   tags: ["Nodes"],
+        //   summary: "Removes explicit data node parameters by identity matching loops and scrub reference mappings",
+        //   parameters: [
+        //     { in: "path", name: "id", required: true, schema: { type: "string" } },
+        //   ],
+        //   requestBody: {
+        //     required: true,
+        //     content: {
+        //       "application/json": {
+        //         schema: {
+        //           type: "object",
+        //           required: ["ids"],
+        //           properties: {
+        //             ids: { type: "array", items: { type: "string" }, example: ["room_101", "junc_55"] }
+        //           }
+        //         }
+        //       }
+        //     }
+        //   },
+        //   responses: {
+        //     200: { description: "Target items stripped clean and dependency connections decoupled successfully" },
+        //     404: { description: "Target context profile not found" },
+        //     500: { description: "Entity operation removal workflow execution error encountered" }
+        //   }
+        // }
       },
     },
   },
@@ -592,9 +592,7 @@ app.delete("/api/maps/:id", authenticateToken, async (req, res) => {
   try {
     const map = await MapDoc.findOne({ id: req.params.id });
     if (!map) return res.status(404).json({ error: "Map not found" });
-    if (map.ownerId !== req.user.id)
-      return res.status(403).json({ error: "Unauthorized" });
-
+   
     await MapDoc.deleteOne({ id: req.params.id });
     const file = path.join(DATA_DIR, `${req.params.id}.svg`);
     if (fs.existsSync(file)) fs.unlinkSync(file);
